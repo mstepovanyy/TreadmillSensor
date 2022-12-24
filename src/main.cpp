@@ -21,7 +21,7 @@
  *      blink 2 times   - Cannot configure mpu6050 sensor
  *      blink 3 times   - Cannot configure vl53lox sensor
  */
-
+#include <Arduino.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -30,6 +30,7 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
+#include <RunningMedian.h>
 
 // Incline sensor
 #include <VL53L0X.h>
@@ -37,18 +38,29 @@ VL53L0X tofSensor;
 
 // Cadence sensor
 Adafruit_MPU6050 mpu;
+RunningMedian cadenceFilter(20);
 
 // Speed sensor
 #define HALL_SENSOR_PIN 26
+// Default I2C pins for SDA=21, SCL=22, used for VL53L0X, MPU6050
 
 
-// Default pins for SDA=21, SCL=22
-#define TREADMILL_LENGTH 1450
+// Configure tredmill length from VL53L0X sensor location to back 
+#define TREADMILL_LENGTH 1450           // in milimeters
+#define TREADMILL_CYLINDER_LENGTH 0.174 // in meters
+// INITIAL_INCLINE_DEGREE 0.95 == 24mm for ter
 // TOF_SENSOR_HEIGTH = min_sensor_height - (TREADMILL_LENGTH * sin(radians(MIN_INCLINE_IN_DEGREE))) = 170 - 24 = 150
-#define TOF_SENSOR_HEIGTH 150
+
+#define TOF_SENSOR_HEIGTH 89
 // #define INITIAL_INCLINE_PERCENT 1.65
 // #define INITIAL_INCLINE_DEGREE 0.95
-#define ACCELERATION_Z 9.8
+
+//cadence
+// max cadence 280 per minute, or 4.6 per second, or 1 step per 0.218 seconds
+#define CADENCE_DEBOUNCE_TIME 218
+#define MAX_STEP_DURATION 500
+
+//#define DEBUG
 
 
 #define RSCService BLEUUID((uint16_t)0x1814)
@@ -61,11 +73,17 @@ BLEDescriptor FTMSDescriptor(BLEUUID((uint16_t)0x2901));
 
 bool bluetoothClientConected = false;
 unsigned long bleNotifyTime = millis();
+volatile unsigned int rotationCount = 0;
+
+void rotationIncrement() {
+    rotationCount++;
+}
+
 
 class TreadmillData {
     
     public:
-        float mps = 0;
+        double mps = 0;
         uint8_t cadence = 0;               // Unit is 1/min
         int16_t inclinePercent = 0;        // Unit is 1/10 of a percent
         int16_t inclineDegree = 0;         // Unit is 1/10 of a degree
@@ -81,42 +99,48 @@ class TreadmillData {
         void procedSpeed();
         void procedIncline();
         void procedCadence();
-        void rotationIncrement() { rotationCount++; };
-
     private:
-        unsigned long startRotationTimeFrame = 0;
-        unsigned int rotationCount = 0;
-        float rotationLength = 0.14;
+        // speed
+        unsigned long startRotationTime = 0;
+        float rotationLength = TREADMILL_CYLINDER_LENGTH;
 
-        unsigned long startInclineTimeFrame = 0;
+        // incline
+        unsigned long startInclineTime = 0;
         unsigned long startReadValueTime = 0;
         uint16_t inclineMax = 0;
 
-        uint16_t stepCount = 0;
-        bool stepDown = false;
-        bool stepUp = false;
-        unsigned long startCadenceTimeFrame = 0;
+        // cadence
+        unsigned long startStepTime = 0;
+        unsigned long startCadenceTime = 0;
+
+        // total distance time
+        unsigned long startTotalDistanceTime = 0;
 };
 
 void TreadmillData::procedSpeed() {
-    unsigned long endRotationTimeFrame = millis();
-    if (endRotationTimeFrame - startRotationTimeFrame  > 1000) {
+    unsigned long endRotationTime = millis();
+    if (endRotationTime - startRotationTime  > 3000) {
         if (rotationCount == 0) {
             mps = 0;
         } else {
-            mps = rotationCount * rotationLength / (endRotationTimeFrame - startRotationTimeFrame) * 1000;
+            mps = rotationCount * rotationLength * 1000 / (endRotationTime - startRotationTime) ;
         }
-        startRotationTimeFrame = endRotationTimeFrame;
-        rotationCount = 0;
+#ifdef DEBUG
         Serial.print("Current speed: ");
-        Serial.println(mps);
+        Serial.print(mps);
+        Serial.print("Rotation: ");
+        Serial.println(rotationCount);
+#endif
+        startRotationTime = endRotationTime;
+        rotationCount = 0;
     }
+    
 }
 
 void TreadmillData::procedIncline() {
     unsigned long endInclineTime = millis();
 
-    if (endInclineTime - startInclineTimeFrame > 3000) {
+    if (endInclineTime - startInclineTime > 3000) {
         uint16_t inclineInMilimiter = inclineMax - TOF_SENSOR_HEIGTH;
         if (inclineInMilimiter > 1000) inclineInMilimiter = 0;
         uint16_t length_at_zero_level = sqrt(TREADMILL_LENGTH * TREADMILL_LENGTH - inclineInMilimiter * inclineInMilimiter);
@@ -124,17 +148,19 @@ void TreadmillData::procedIncline() {
             inclinePercent = 0;
             inclineDegree = 0;
         } else {
-            inclinePercent = inclineInMilimiter * 100 * 10 / length_at_zero_level;  // 100% and 0.1 resolution
+            inclinePercent = inclineInMilimiter * 100 * 10 / length_at_zero_level;                  // 100% and 0.1 resolution
             inclineDegree = degrees(atan(inclineInMilimiter/(float)length_at_zero_level)) * 10;     // 0.1 resolution
         }
 
-        unsigned long duration = endInclineTime - startInclineTimeFrame;
+        unsigned long duration = endInclineTime - startInclineTime;
         if (mps == 0 || inclinePercent == 0) {
             elevationGain = 0;
         } else {
-            elevationGain += mps * duration / 100 * inclinePercent / 1000;    // duration in millis 1s = 1000ms, and elevation resolution 1/10.
+            // duration in millis, 1s = 1000ms, and elevation resolution 1/10.
+            elevationGain += mps * duration / 100 * inclinePercent / 1000;
         }
-        startInclineTimeFrame = endInclineTime;
+        startInclineTime = endInclineTime;
+#ifdef DEBUG
         Serial.print("Incline: ");
         Serial.print(inclineInMilimiter);
         Serial.print(", length_at_zero_level: ");
@@ -145,8 +171,10 @@ void TreadmillData::procedIncline() {
         Serial.print(inclineDegree);
         Serial.print(", elevation: ");
         Serial.println(elevationGain);
+#endif
         inclineMax = 0;
-    } else if (endInclineTime - startReadValueTime > 200) {  // Read incline each 200ms and pick max value
+    } else if (endInclineTime - startReadValueTime > 700) {
+        // Read incline each 700ms and pick max value
         inclineMax = max(inclineMax, tofSensor.readRangeSingleMillimeters());
         startReadValueTime = endInclineTime;
     }
@@ -154,56 +182,40 @@ void TreadmillData::procedIncline() {
 
 void TreadmillData::procedCadence() {
     if(mpu.getMotionInterruptStatus()) {
-        /* Get new sensor events with the readings */
         sensors_event_t a, g, temp;
         mpu.getEvent(&a, &g, &temp);
 
-        if (a.acceleration.z < 0) {
-            stepDown = true;
+        // pick acceleration in range 11 - 20
+        if (a.acceleration.z < 20 && a.acceleration.z > 11 && a.timestamp - startStepTime > CADENCE_DEBOUNCE_TIME) {
+            if (a.timestamp - startStepTime < MAX_STEP_DURATION) {
+                // Steps that do not lay in range CADENCE_DEBOUNCE_TIME - MAX_STEP_DURATION are ignored.
+                // 218 ms - 275 steps per minute
+                // 500 ms - 120 steps per minute
+                cadenceFilter.add(60000 / (a.timestamp - startStepTime));
+            }
+            startStepTime = a.timestamp;
+            
+            if (a.timestamp - startCadenceTime > 3000) {
+                // all array 20 values, pick only middle 10 to get cadence
+                cadence = cadenceFilter.getAverage(10);     
+                startCadenceTime = a.timestamp;
+#ifdef DEBUG
+                Serial.print("Cadence: ");
+                Serial.println(cadence);
+#endif
+            }
         }
-        
-        if (a.acceleration.z > ACCELERATION_Z) {
-            stepUp = true;
-        }
-
-        if (stepDown && stepUp) {
-            stepCount++;
-            stepDown = false;
-            stepUp = false;
-        }
-
-        /* Print out the values */
-        Serial.print("AccelX:");
-        Serial.print(a.acceleration.x);
-        Serial.print(",");
-        Serial.print("AccelY:");
-        Serial.print(a.acceleration.y);
-        Serial.print(",");
-        Serial.print("AccelZ:");
-        Serial.print(a.acceleration.z);
-        Serial.print(", ");
-        Serial.print("GyroX:");
-        Serial.print(g.gyro.x);
-        Serial.print(",");
-        Serial.print("GyroY:");
-        Serial.print(g.gyro.y);
-        Serial.print(",");
-        Serial.print("GyroZ:");
-        Serial.print(g.gyro.z);
-        Serial.println("");
+#ifdef DEBUG
+        Serial.print("Time: ");
+        Serial.print(millis());
+        Serial.print(" AccelZ:");
+        Serial.println(a.acceleration.z);
+#endif
     }
 
-    unsigned long endCadenceTimeFrame = millis();
-    if (endCadenceTimeFrame - startCadenceTimeFrame  > 1000) {
-        if (stepCount == 0) {
-            cadence = 0;
-        } else {
-            cadence = stepCount * 1000 / (endCadenceTimeFrame - startCadenceTimeFrame);
-        }
-        startCadenceTimeFrame = endCadenceTimeFrame;
-        stepCount = 0;
-        Serial.print("Current cadence: ");
-        Serial.println(cadence);
+    // reset cadence in case no new steps made for 5 seconds
+    if (millis() - startStepTime > 5000) { 
+        cadence = 0;
     }
 }
 
@@ -213,7 +225,11 @@ uint8_t* TreadmillData::getRscData() {
     if (mps != 0 && cadence != 0) {
         strideLength = mps / cadence * 2 * 100;    
     }
-    totalDistance += mps * 10;                          // TODO: calculate this data. Unit is 1/10 m, distance over time
+
+    // It had to be value overall time, but for now it is just for online time.
+    unsigned long currentTime = millis();
+    totalDistance += mps * (currentTime - startTotalDistanceTime) / 1000;
+    startTotalDistanceTime = currentTime;
  
     rscDataArray[0] = 3;
     // '00000011'
@@ -250,9 +266,7 @@ uint8_t* TreadmillData::getTreadmillData() {
     // More: GATT_Specification_Supplement_v7.pdf
 
 
-    uint16_t speedInKmph = mps * 360;                       // kilometer per hour with a resolution of 0.01
-    int16_t inclinePercentInUnits = inclinePercent * 10;    // percent with a resolution of 0.1
-    int16_t inclineDegreeInUnits = inclineDegree * 10;      // degree with a resolution of 0.1
+    uint16_t speedInKmph = mps * 360;                       // kilometers per hour with a resolution of 0.01
     uint16_t positiveElevationGain = elevationGain * 10;    // elevation from begining of the training session, in meters, resolution 0.1
 
     treadmillDataArray[0] = (uint8_t)(FTMSFlags & 0xFF);
@@ -261,11 +275,11 @@ uint8_t* TreadmillData::getTreadmillData() {
     treadmillDataArray[2] = (uint8_t)(speedInKmph & 0xFF);
     treadmillDataArray[3] = (uint8_t)(speedInKmph >> 8);
 
-    treadmillDataArray[4] = (uint8_t)(inclinePercentInUnits & 0xFF);
-    treadmillDataArray[5] = (uint8_t)(inclinePercentInUnits >> 8);
+    treadmillDataArray[4] = (uint8_t)(inclinePercent & 0xFF);
+    treadmillDataArray[5] = (uint8_t)(inclinePercent >> 8);
     
-    treadmillDataArray[6] = (uint8_t)(inclineDegreeInUnits & 0xFF);
-    treadmillDataArray[7] = (uint8_t)(inclineDegreeInUnits >> 8);
+    treadmillDataArray[6] = (uint8_t)(inclineDegree & 0xFF);
+    treadmillDataArray[7] = (uint8_t)(inclineDegree >> 8);
 
     treadmillDataArray[8] = (uint8_t)(positiveElevationGain & 0xFF);
     treadmillDataArray[9] = (uint8_t)(positiveElevationGain >> 8);
@@ -290,20 +304,18 @@ class ServerStatusCallbacks : public BLEServerCallbacks
     {
         Serial.println("BLE Disconnected");
         bluetoothClientConected = false;
-        pServer->getAdvertising()->start();
-        
+        pServer->getAdvertising()->start();        
     }
 };
 
 void mpu6050SensorSetup() {
-    Serial.println("Adafruit MPU6050 test!");
-
-    // Try to initialize!
+    Serial.println("Adafruit MPU6050 test");
     if (!mpu.begin()) {
         Serial.println("Failed to find MPU6050 chip");
-        while (1) { // blink two times in case of mpu6050 cannot start
+        while (1) {
+            // blink two times in case of mpu6050 cannot start
             delay(1000);
-            for (u_int8_t i = 0; i <= 2; i++) {
+            for (u_int8_t i = 0; i < 2; i++) {
                 digitalWrite(LED_BUILTIN, HIGH);
                 delay(200);
                 digitalWrite(LED_BUILTIN, LOW);
@@ -313,28 +325,28 @@ void mpu6050SensorSetup() {
     }
     Serial.println("MPU6050 Found!");
 
-    //setupt motion detection
+    // setup motion detection
     mpu.setHighPassFilter(MPU6050_HIGHPASS_0_63_HZ);
-    mpu.setMotionDetectionThreshold(30);
+    mpu.setMotionDetectionThreshold(2);
     mpu.setMotionDetectionDuration(20);
-    mpu.setInterruptPinLatch(true);	// Keep it latched.  Will turn off when reinitialized.
+    mpu.setInterruptPinLatch(true);	// Keep it lanched.  Will turn off when reinitialized.
     mpu.setInterruptPinPolarity(true);
     mpu.setMotionInterrupt(true);
-
-    Serial.println("");
 }
 
 void hallSensorSetup() {
     Serial.println("Configure Hall sensor");
-    attachInterrupt(digitalPinToInterrupt(HALL_SENSOR_PIN), []() { treadmillData.rotationIncrement(); }, RISING);
+    pinMode(HALL_SENSOR_PIN, INPUT);
+    attachInterrupt(digitalPinToInterrupt(HALL_SENSOR_PIN), rotationIncrement, RISING);
 }
 
 void vl53loxSensorSetup() {
     Serial.println("Configure VL53LOX sensor");
     if (!tofSensor.init()) {
-        while (1) { // blink three times in case of vl53lox cannot start
+        while (1) {
+            // blink three times in case of vl53lox cannot start
             delay(1000);
-            for (u_int8_t i = 0; i <= 3; i++) {
+            for (u_int8_t i = 0; i < 3; i++) {
                 digitalWrite(LED_BUILTIN, HIGH);
                 delay(200);
                 digitalWrite(LED_BUILTIN, LOW);
@@ -390,9 +402,9 @@ void setup()
 
     Serial.println("Initial setup");
     
+    hallSensorSetup();
     Wire.begin();
     
-    hallSensorSetup();
     vl53loxSensorSetup();
     mpu6050SensorSetup();
     bleSetup();
