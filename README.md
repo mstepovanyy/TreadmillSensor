@@ -22,13 +22,14 @@
      blink 2 times   - Cannot configure mpu6050 sensor
      blink 3 times   - Cannot configure vl53lox sensor
 
-### Connection
+### ESP32 Connections
 I2C(SDA=21, SCL=22) pins - for `MPU6050` and `VL53L0X`
 26 pin - Hall sensor A3144E
 GND pin - on treadmill
 
 ### Configure for use
-TBD
+Project is using PlatformIO + VisualStudio.
+Regular workflow: build + deploy
 
 ### ZWIFT view
 TBD
@@ -41,3 +42,7 @@ TBD
 
 ### Notes
 Wires could be affected by DC Motor, especially Hall Sensor. Use shielded wires, or connect GND contact of ESP32 to treadmill.
+
+Inspired by projects:
+    https://github.com/lefty01/ESP32_TTGO_FTMS
+    https://github.com/imwitti/FootpodMimic

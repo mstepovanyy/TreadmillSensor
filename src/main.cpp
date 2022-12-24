@@ -45,7 +45,7 @@ RunningMedian cadenceFilter(20);
 // Default I2C pins for SDA=21, SCL=22, used for VL53L0X, MPU6050
 
 
-// Configure tredmill length from VL53L0X sensor location to back 
+// Configure tredmill length from VL53L0X sensor location to back of the treadmill
 #define TREADMILL_LENGTH 1450           // in milimeters
 #define TREADMILL_CYLINDER_LENGTH 0.174 // in meters
 // INITIAL_INCLINE_DEGREE 0.95 == 24mm for ter
@@ -416,9 +416,7 @@ void setup()
 void loop()
 {
     treadmillData.procedSpeed();
-    
     treadmillData.procedIncline();
-
     treadmillData.procedCadence();
 
     if (millis() - bleNotifyTime > 1000) {
