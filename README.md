@@ -32,10 +32,10 @@ Project is using PlatformIO + VisualStudio.
 Regular workflow: build + deploy
 
 ### ZWIFT view
-TBD
+![Zwift](./img/zwift_example.jpg?raw=true)
 
 ### Strava chart
-TBD
+![Zwift](./img/strava_example.jpg?raw=true)
 
 ### Hardware instalation
 TBD
