@@ -35,7 +35,7 @@ Regular workflow: build + deploy
 ![Zwift](./img/zwift_example.jpg?raw=true)
 
 ### Strava chart
-![Zwift](./img/strava_example.jpg?raw=true)
+![Strava](./img/strava_example.png?raw=true)
 
 ### Hardware instalation
 TBD
